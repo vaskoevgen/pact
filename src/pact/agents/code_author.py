@@ -434,20 +434,24 @@ Example response format:
 {{"files": {{"module.py": "# implementation code..."}}}}"""
 
     # Use a simple wrapper model for the response
-    from pydantic import BaseModel, field_validator
+    import json as _json
+    from pydantic import BaseModel, model_validator
 
     class CodeResponse(BaseModel):
         """Generated implementation files."""
         files: dict[str, str]
 
-        @field_validator("files", mode="before")
+        @model_validator(mode="before")
         @classmethod
-        def _serialize_dict_values(cls, v: dict) -> dict:
-            import json as _json
-            return {
-                k: _json.dumps(val, indent=2) if isinstance(val, dict) else str(val)
-                for k, val in v.items()
-            }
+        def _stringify_file_values(cls, data: dict) -> dict:
+            """Serialize any dict/list file contents to JSON strings before validation."""
+            raw_files = data.get("files", {})
+            if isinstance(raw_files, dict):
+                data["files"] = {
+                    k: _json.dumps(v, indent=2) if isinstance(v, (dict, list)) else str(v)
+                    for k, v in raw_files.items()
+                }
+            return data
 
     _system_prompts = {
         "typescript": CODE_SYSTEM_TS,
