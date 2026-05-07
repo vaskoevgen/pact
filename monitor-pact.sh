@@ -96,6 +96,15 @@ sep
 
 LAST_PHASE=""
 CHECK=0
+STUCK_TIMEOUT="${STUCK_TIMEOUT:-600}"   # seconds of no audit progress = stuck (default 10 min)
+LAST_AUDIT_TS=""
+
+# extract the timestamp of the most recent audit log entry
+last_audit_ts() {
+    "$PACT" log "$PROJECT" 2>/dev/null \
+        | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' \
+        | tail -1
+}
 
 while true; do
     STATUS=$("$PACT" status "$PROJECT" 2>&1) || STATUS="ERROR: pact status failed"
@@ -115,11 +124,41 @@ while true; do
     if echo "$STATUS" | grep -q "Interview questions pending"; then
         echo "[$(ts)] → INTERVIEW PAUSE — running: pact approve"
         "$PACT" approve "$PROJECT" 2>&1 | grep -E 'Q:|Daemon|approved' | head -6
+        LAST_AUDIT_TS=""   # reset; approval triggers new activity
     fi
 
     if echo "$STATUS" | grep -qiE "health.*check|dysmemic|DEGRADED|Reason:.*health|paused.*health"; then
         echo "[$(ts)] → HEALTH GATE — running: pact resume"
         "$PACT" resume "$PROJECT" 2>&1
+        LAST_AUDIT_TS=""
+    fi
+
+    # ── silent-hang detection ─────────────────────────────────
+    # Daemon is alive and status=active but audit log hasn't moved in STUCK_TIMEOUT seconds.
+    if echo "$STATUS" | grep -q "Daemon: running" && echo "$STATUS" | grep -q "active"; then
+        CURRENT_AUDIT_TS=$(last_audit_ts)
+        if [[ -n "$CURRENT_AUDIT_TS" ]]; then
+            if [[ "$CURRENT_AUDIT_TS" == "$LAST_AUDIT_TS" ]]; then
+                # compute seconds since last audit entry
+                LAST_EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%S' "$LAST_AUDIT_TS" '+%s' 2>/dev/null \
+                          || date -d "$LAST_AUDIT_TS" '+%s' 2>/dev/null || echo 0)
+                NOW_EPOCH=$(date '+%s')
+                SILENT_SECS=$(( NOW_EPOCH - LAST_EPOCH ))
+                if (( SILENT_SECS >= STUCK_TIMEOUT )); then
+                    echo "[$(ts)] ⚠  SILENT HANG detected — no audit progress for ${SILENT_SECS}s (limit=${STUCK_TIMEOUT}s)"
+                    echo "[$(ts)] → killing daemon PID and restarting..."
+                    DPID=$(echo "$STATUS" | grep -oE 'PID [0-9]+' | awk '{print $2}')
+                    [[ -n "$DPID" ]] && kill "$DPID" 2>/dev/null && sleep 2
+                    "$PACT" daemon "$PROJECT" &
+                    sleep 4
+                    "$PACT" resume "$PROJECT" 2>/dev/null || true
+                    echo "[$(ts)] daemon restarted after hang"
+                    LAST_AUDIT_TS=""
+                fi
+            else
+                LAST_AUDIT_TS="$CURRENT_AUDIT_TS"
+            fi
+        fi
     fi
 
     # ── restart daemon if dead ────────────────────────────────
@@ -129,6 +168,7 @@ while true; do
         sleep 4
         "$PACT" resume "$PROJECT" 2>/dev/null || true
         echo "[$(ts)] daemon restarted"
+        LAST_AUDIT_TS=""
     fi
 
     # ── terminal states ───────────────────────────────────────

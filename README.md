@@ -265,10 +265,17 @@ bash monitor-pact.sh /abs/path/to/project 60    # 60 s poll
 | Interview questions pending | Runs `pact approve` |
 | Health gate / dysmemic pressure | Runs `pact resume` |
 | Daemon process died | Restarts daemon, then resumes |
+| Silent hang (active but no audit progress for N min) | Kills and restarts daemon |
 | Phase changes or every 5th poll | Prints `pact log` tail |
 | During implement/integrate | Also prints `pact components` |
 | Build complete / certified | Prints summary and exits 0 |
 | Build failed | Prints last 20 log lines and exits 1 |
+
+Override the hang timeout (default 10 min):
+
+```bash
+STUCK_TIMEOUT=300 bash monitor-pact.sh . 15   # restart after 5 min of silence
+```
 
 **Path resolution** (no hardcoded paths):
 
