@@ -159,7 +159,7 @@ while true; do
         LAST_AUDIT_TS=""
     fi
 
-    if echo "$STATUS" | cgrep -qiE "health.*check|dysmemic|DEGRADED|Reason:.*health|paused.*health"; then
+    if echo "$STATUS" | cgrep -qiE 'Health: (CRITICAL|DEGRADED)'; then
         echo "[$(ts)] → HEALTH GATE — running: pact resume"
         "$PACT" resume "$PROJECT" 2>&1 || true
         LAST_AUDIT_TS=""
@@ -197,7 +197,7 @@ while true; do
     fi
 
     # ── restart daemon if dead ────────────────────────────────
-    if echo "$STATUS" | cgrep -qiE "stopped|no daemon|not running|ERROR:"; then
+    if echo "$STATUS" | cgrep -qiE "Daemon: (stopped|not running)|no daemon|ERROR: pact status failed"; then
         echo "[$(ts)] ⚠  daemon dead — restarting..."
         "$PACT" daemon "$PROJECT" &
         sleep 4
@@ -207,7 +207,7 @@ while true; do
     fi
 
     # ── terminal states ───────────────────────────────────────
-    if echo "$STATUS" | cgrep -qE 'complete|certified'; then
+    if echo "$STATUS" | cgrep -qE '^\[[0-9a-f]+\] (complete|certified)'; then
         sep
         echo "[$(ts)] ✅  BUILD COMPLETE"
         sep
@@ -216,7 +216,7 @@ while true; do
         exit 0
     fi
 
-    if echo "$STATUS" | cgrep -q "failed"; then
+    if echo "$STATUS" | cgrep -qE '^\[[0-9a-f]+\] failed'; then
         sep
         echo "[$(ts)] ❌  BUILD FAILED"
         sep
