@@ -55,8 +55,10 @@ fi
 ts()  { date '+%H:%M:%S'; }
 sep() { printf '%0.s─' {1..64}; echo; }
 
-# grep that never returns non-zero (avoids silent script death)
+# grep for capturing output — never returns non-zero (avoids silent script death on pipefail)
 sgrep() { grep "$@" || true; }
+# grep for if-condition tests — exit code matters; since there's no set -e, plain grep is safe
+cgrep() { grep "$@"; }
 
 print_status() {
     local s="$1"
@@ -151,20 +153,20 @@ while true; do
     fi
 
     # ── auto-handle pauses ────────────────────────────────────
-    if echo "$STATUS" | sgrep -q "Interview questions pending"; then
+    if echo "$STATUS" | cgrep -q "Interview questions pending"; then
         echo "[$(ts)] → INTERVIEW PAUSE — running: pact approve"
         "$PACT" approve "$PROJECT" 2>&1 | sgrep -E 'Q:|Daemon|approved' | head -6 || true
         LAST_AUDIT_TS=""
     fi
 
-    if echo "$STATUS" | sgrep -qiE "health.*check|dysmemic|DEGRADED|Reason:.*health|paused.*health"; then
+    if echo "$STATUS" | cgrep -qiE "health.*check|dysmemic|DEGRADED|Reason:.*health|paused.*health"; then
         echo "[$(ts)] → HEALTH GATE — running: pact resume"
         "$PACT" resume "$PROJECT" 2>&1 || true
         LAST_AUDIT_TS=""
     fi
 
     # ── silent-hang detection ─────────────────────────────────
-    if echo "$STATUS" | sgrep -q "Daemon: running" && echo "$STATUS" | sgrep -q "active"; then
+    if echo "$STATUS" | cgrep -q "Daemon: running" && echo "$STATUS" | cgrep -q "active"; then
         CURRENT_AUDIT_TS=$(last_audit_ts)
         if [[ -n "$CURRENT_AUDIT_TS" && -n "$LAST_AUDIT_TS" ]]; then
             if [[ "$CURRENT_AUDIT_TS" == "$LAST_AUDIT_TS" ]]; then
@@ -195,7 +197,7 @@ while true; do
     fi
 
     # ── restart daemon if dead ────────────────────────────────
-    if echo "$STATUS" | sgrep -qiE "stopped|no daemon|not running|ERROR:"; then
+    if echo "$STATUS" | cgrep -qiE "stopped|no daemon|not running|ERROR:"; then
         echo "[$(ts)] ⚠  daemon dead — restarting..."
         "$PACT" daemon "$PROJECT" &
         sleep 4
@@ -205,7 +207,7 @@ while true; do
     fi
 
     # ── terminal states ───────────────────────────────────────
-    if echo "$STATUS" | sgrep -qE 'complete|certified'; then
+    if echo "$STATUS" | cgrep -qE 'complete|certified'; then
         sep
         echo "[$(ts)] ✅  BUILD COMPLETE"
         sep
@@ -214,7 +216,7 @@ while true; do
         exit 0
     fi
 
-    if echo "$STATUS" | sgrep -q "failed"; then
+    if echo "$STATUS" | cgrep -q "failed"; then
         sep
         echo "[$(ts)] ❌  BUILD FAILED"
         sep
