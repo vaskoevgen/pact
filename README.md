@@ -242,6 +242,61 @@ Either, neither, or both. Defaults: both off (sequential, single-attempt).
 
 Run flags: `--constrain-dir`, `--ledger-dir`, `--skip-arbiter`.
 
+## Monitoring the Daemon
+
+`monitor-pact.sh` is a shell script included in this repo that watches a running daemon, auto-handles every pause type, and prints a live status line every N seconds.
+
+**Usage:**
+
+```bash
+# from the pact repo directory
+bash monitor-pact.sh <project-dir> [interval-seconds]
+
+# examples
+bash monitor-pact.sh .                          # project in current dir, 30 s poll
+bash monitor-pact.sh ../my-project 15           # 15 s poll
+bash monitor-pact.sh /abs/path/to/project 60    # 60 s poll
+```
+
+**What it does automatically:**
+
+| Situation | Action |
+|-----------|--------|
+| Interview questions pending | Runs `pact approve` |
+| Health gate / dysmemic pressure | Runs `pact resume` |
+| Daemon process died | Restarts daemon, then resumes |
+| Phase changes or every 5th poll | Prints `pact log` tail |
+| During implement/integrate | Also prints `pact components` |
+| Build complete / certified | Prints summary and exits 0 |
+| Build failed | Prints last 20 log lines and exits 1 |
+
+**Path resolution** (no hardcoded paths):
+
+- **Pact binary** — looks for `.venv/bin/pact` next to the script (pact repo checkout), falls back to `pact` on `PATH`
+- **API key** — reads `ANTHROPIC_API_KEY` from environment, then walks up to 4 parent directories searching for `.env`, then checks `~/.env`
+
+**Sample output:**
+
+```
+────────────────────────────────────────────────────────────────
+  pact monitor
+  project:  /path/to/my-project
+  pact:     /path/to/pact/.venv/bin/pact
+  interval: 30s   (Ctrl+C to stop)
+────────────────────────────────────────────────────────────────
+[13:29:00]  daemon=running   state=active    phase=decompose      cost=$0.07    HEALTHY
+[13:29:30]  daemon=running   state=active    phase=decompose      cost=$0.41    HEALTHY
+  ┌─ pact log (last 6 entries) ─────────────────────────
+  │ 13:27:50 daemon_dispatch — Phase: interview
+  │ 13:29:00 daemon_dispatch — Phase: decompose
+  └──────────────────────────────────────────────────────
+[13:30:00]  daemon=running   state=paused    phase=interview      cost=$0.08    HEALTHY
+[13:30:00] → INTERVIEW PAUSE — running: pact approve
+[13:30:30]  daemon=running   state=active    phase=implement      cost=$1.24    HEALTHY
+[13:31:00] → HEALTH GATE — running: pact resume
+[13:35:00]  ✅  BUILD COMPLETE
+```
+
 ## Configuration
 
 **Per-project** (`pact.yaml` in project directory):
