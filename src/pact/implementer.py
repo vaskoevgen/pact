@@ -228,9 +228,9 @@ def _find_defined_names_ts(source: str) -> set[str]:
     import re as _re
     names: set[str] = set()
 
-    # export (interface|type|enum|class|function|const|let) Name
+    # export [async] (interface|type|enum|class|function|const|let) Name
     for m in _re.finditer(
-        r"export\s+(?:interface|type|enum|class|function|const|let)\s+(\w+)",
+        r"export\s+(?:async\s+)?(?:interface|type|enum|class|function|const|let)\s+(\w+)",
         source,
     ):
         names.add(m.group(1))
