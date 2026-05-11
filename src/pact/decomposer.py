@@ -579,8 +579,10 @@ async def decompose_and_contract(
     test_suites: dict[str, ContractTestSuite] = project.load_all_test_suites()
 
     for component_id in order:
-        # Skip if contract and tests already exist
-        if component_id in contracts and component_id in test_suites:
+        # Skip if contract and tests already exist AND test suite is complete
+        # (test_cases: [] means partial write — must regenerate)
+        suite_complete = component_id in test_suites and len(test_suites[component_id].test_cases) > 0
+        if component_id in contracts and suite_complete:
             logger.info("Skipping %s — contract and tests already exist", component_id)
             continue
 
@@ -651,8 +653,9 @@ async def decompose_and_contract(
             contract = contracts[component_id]
             logger.info("Skipping contract for %s — already exists", component_id)
 
-        # Author tests (skip if already exist)
-        if component_id not in test_suites:
+        # Author tests (skip if already exist AND suite is complete)
+        suite_complete = component_id in test_suites and len(test_suites[component_id].test_cases) > 0
+        if not suite_complete:
             suite, test_research, test_plan = await author_tests(
                 agent, contract,
                 dependency_contracts=dep_contracts,
