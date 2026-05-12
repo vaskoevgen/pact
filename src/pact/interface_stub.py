@@ -57,6 +57,15 @@ _PYTHON_BUILTINS = frozenset({
     # Common stdlib/library types used as type refs, not exports
     "Path", "datetime", "timedelta", "date", "Decimal", "UUID",
     "SecretStr", "BaseModel",
+    # JavaScript / TypeScript built-in globals — never exported from user modules
+    "Error", "RangeError", "ReferenceError", "SyntaxError", "URIError",
+    "EvalError", "Promise", "Array", "Object", "Function", "Symbol",
+    "Map", "Set", "WeakMap", "WeakSet", "Date", "RegExp", "JSON",
+    "Math", "Number", "String", "Boolean", "BigInt",
+    # TypeScript utility / mapped types — language built-ins, not module exports
+    "Record", "Partial", "Required", "Readonly", "Pick", "Omit",
+    "Exclude", "Extract", "NonNullable", "ReturnType", "InstanceType",
+    "Parameters", "ConstructorParameters", "Awaited",
 })
 
 
@@ -94,7 +103,11 @@ def _is_importable_export(name: str) -> bool:
         return False
     if name.startswith("__") and name.endswith("__"):  # Dunders
         return False
-    if name in _PYTHON_BUILTINS:  # Builtins
+    if name in _PYTHON_BUILTINS:  # Python and JS/TS builtins
+        return False
+    if "<" in name or ">" in name:  # TypeScript generic expressions e.g. Record<A, B>
+        return False
+    if " " in name:  # Phrases cannot be identifiers e.g. "React runtime error"
         return False
     return True
 
