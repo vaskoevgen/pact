@@ -310,6 +310,88 @@ class Scheduler:
                 max_concurrent_agents=4,
             )
 
+    async def _generate_sops_rule(self, pause_reason: str, sample_error: str) -> str:
+        """Call Claude Haiku to generate a targeted sops.md rule for a systemic failure.
+
+        Returns the generated rule text, or empty string on failure.
+        """
+        import os
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return ""
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            sops = self.project.load_sops()
+            lang = self.project_config.language or "unknown"
+            test_fw = self.project_config.test_framework or "unknown"
+            missing_exports_lines = "\n".join(
+                line for line in sample_error.splitlines()
+                if "Cannot auto-fix" in line or "missing exports" in line
+            )
+            prompt = (
+                f"A pact build pipeline ({lang}/{test_fw} project) paused with this failure:\n\n"
+                f"PAUSE REASON: {pause_reason}\n\n"
+                f"MISSING EXPORTS (exact error lines):\n{missing_exports_lines}\n\n"
+                f"RECENT ERROR CONTEXT:\n{sample_error[:1500]}\n\n"
+                f"CURRENT sops.md:\n{sops[:2000]}\n\n"
+                "IMPORTANT: Look carefully at the missing export names.\n"
+                "- If any name contains angle brackets (e.g. `Record<A, B>`), spaces, or is a "
+                "JS built-in global (`Error`, `RangeError`) — the CONTRACT is broken, not the "
+                "implementation. Write a rule for the contract author.\n"
+                "- Otherwise write a rule for the code author.\n\n"
+                f"Write ONE short rule (1-2 sentences, imperative tone) to add to sops.md that "
+                f"would prevent this failure. The rule must be {lang}-specific and actionable for "
+                "an AI code generator. Reply with ONLY the rule text, no explanation, no markdown."
+            )
+            msg = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=150,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            logger.warning("generate_sops_rule failed: %s", e)
+            return ""
+
+    async def _generate_intervention_report(self, pause_reason: str, sample_error: str) -> str:
+        """Call Claude Haiku to produce a human-readable root-cause + fix report.
+
+        Used when auto-fix has already been attempted and failed.
+        Returns the report text, or a plain message on failure.
+        """
+        import os
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return f"Manual intervention required. Pause reason: {pause_reason}"
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            sops = self.project.load_sops()
+            lang = self.project_config.language or "unknown"
+            test_fw = self.project_config.test_framework or "unknown"
+            prompt = (
+                f"A pact build pipeline ({lang}/{test_fw} project) auto-fix was attempted but "
+                "the same failure keeps recurring.\n\n"
+                f"FAILURE: {pause_reason}\n\n"
+                f"RECENT LOG (error context):\n{sample_error[:2000]}\n\n"
+                f"CURRENT sops.md:\n{sops[:1500]}\n\n"
+                "Write a SHORT manual intervention report for a developer. Include:\n"
+                "1. Root cause (1-2 sentences — specific file/function/config, not generic)\n"
+                "2. Exact manual steps to fix it (numbered list, concrete commands if applicable)\n"
+                "3. What to update in sops.md to prevent it next time\n\n"
+                "Be concise and specific. No generic advice. Under 250 words."
+            )
+            msg = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            logger.warning("generate_intervention_report failed: %s", e)
+            return f"Manual intervention required. Pause reason: {pause_reason}"
+
     def _resolved_pcfg(self, implementable: int = 0) -> ParallelConfig:
         """Resolve ParallelConfig with the CLI workers override applied.
 
@@ -1164,22 +1246,59 @@ class Scheduler:
         # Check for systemic failure pattern
         systemic = detect_systemic_failure(results)
         if systemic:
+            pause_reason = (
+                f"Systemic failure: {systemic.pattern_type} "
+                f"({len(systemic.affected_components)} components). "
+                f"{systemic.recommendation}"
+            )
             logger.warning(
                 "Systemic failure detected: %s (%d components). %s",
                 systemic.pattern_type,
                 len(systemic.affected_components),
                 systemic.recommendation,
             )
-            state.pause(
-                f"Systemic failure: {systemic.pattern_type} "
-                f"({len(systemic.affected_components)} components). "
-                f"{systemic.recommendation}"
-            )
-            self.project.save_state(state)
             self.project.append_audit(
                 "systemic_failure",
                 f"{systemic.pattern_type}: {systemic.sample_error[:200]}",
             )
+
+            # Auto-fix: ask Claude Haiku to generate a targeted sops.md rule (max 2 times)
+            if state.sops_autofix_count < 2:
+                rule = await self._generate_sops_rule(pause_reason, systemic.sample_error)
+                if rule:
+                    sops_path = self.project.sops_path
+                    with sops_path.open("a") as f:
+                        from datetime import timezone
+                        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        f.write(f"\n\n## Auto-fix ({ts})\n{rule}\n")
+                    logger.warning("sops.md patched by generate_sops_rule: %s", rule)
+                    self.project.append_audit("sops_autofix", rule[:200])
+                    state.sops_autofix_count += 1
+                    # Reset implement phase so agents re-read the updated sops.md
+                    state.status = "active"
+                    state.phase = "implement"
+                    state.pause_reason = ""
+                    for task in state.component_tasks:
+                        if task.status == "failed":
+                            task.status = "pending"
+                            task.attempts = 0
+                            task.last_error = ""
+                    logger.warning(
+                        "Restarting implement phase with updated sops.md "
+                        "(autofix %d/2)", state.sops_autofix_count
+                    )
+                    self.project.save_state(state)
+                    return state
+            else:
+                # Auto-fix exhausted — generate a human intervention report
+                report = await self._generate_intervention_report(
+                    pause_reason, systemic.sample_error
+                )
+                logger.error("MANUAL INTERVENTION REQUIRED\n%s", report)
+                self.project.append_audit("intervention_report", report[:500])
+
+            state.pause(pause_reason)
+            self.project.save_state(state)
             return state
 
         # Emit per-component events

@@ -703,6 +703,7 @@ class RunState(BaseModel):
     created_at: str = ""
     completed_at: str = ""
     pause_reason: str = ""
+    sops_autofix_count: int = 0  # Times generate_sops_rule fired this run (max 2)
     phase_cycles: int = 0
     health_snapshot: dict = {}  # Serialized HealthMetrics, accumulates across phases
     processing_register: str = ""
