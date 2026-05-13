@@ -314,6 +314,50 @@ def _fuzzy_match(missing_name: str, available: set[str]) -> str | None:
     return None
 
 
+def ensure_root_index_ts(src_dir: Path, component_id: str) -> None:
+    """Ensure src/<cid>/index.ts exists so 'import from ../../src/<cid>' resolves.
+
+    When the LLM places all code in a nested subdirectory and skips the
+    top-level barrel, vitest cannot resolve the directory import. If index.ts
+    is missing, create a minimal one that re-exports from the best available
+    file (index.ts inside a subdirectory, or <cid>.ts, or the first .ts file).
+    """
+    root_index = src_dir / "index.ts"
+    if root_index.exists():
+        return
+
+    # Find the best re-export target (prefer nested index.ts, then <cid>.ts)
+    component_module = component_id.replace("-", "_")
+    candidate: Path | None = None
+
+    nested_index = src_dir / component_module / "index.ts"
+    if nested_index.exists():
+        candidate = nested_index
+    else:
+        cid_ts = src_dir / f"{component_module}.ts"
+        if cid_ts.exists():
+            candidate = cid_ts
+        else:
+            ts_files = [f for f in src_dir.rglob("*.ts") if not f.name.startswith(".")]
+            ts_files = [f for f in ts_files if f != root_index]
+            if ts_files:
+                candidate = ts_files[0]
+
+    if candidate is None:
+        return
+
+    rel = candidate.relative_to(src_dir)
+    rel_str = "./" + str(rel).replace("\\", "/")
+    if rel_str.endswith(".ts"):
+        rel_str = rel_str[:-3]
+
+    root_index.write_text(
+        f"// Auto-generated barrel — re-exports from {rel_str}\n"
+        f"export * from '{rel_str}';\n"
+    )
+    logger.info("Created root index.ts barrel for %s → %s", component_id, rel_str)
+
+
 def validate_and_fix_exports(
     src_dir: Path,
     contract: ComponentContract,
@@ -667,6 +711,8 @@ async def implement_component(
         )
 
         # Export validation gate — check and fix before running tests
+        if language == "typescript":
+            ensure_root_index_ts(src_dir, component_id)
         unfixable = validate_and_fix_exports(src_dir, contract, language=language)
         if unfixable:
             # Add specific missing-export feedback for the next attempt
