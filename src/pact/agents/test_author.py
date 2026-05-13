@@ -9,6 +9,7 @@ Follows the Research-First Protocol:
 from __future__ import annotations
 
 import logging
+import re
 
 from pact.agents.base import AgentBase
 from pact.agents.research import plan_and_evaluate, research_phase
@@ -20,6 +21,38 @@ from pact.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _fix_test_import_path(code: str, component_id: str) -> str:
+    """Rewrite any LLM-generated import of the component under test to the
+    correct relative path: '../../src/<component_id>'.
+
+    The test file lives at tests/<cid>/contract_test.test.ts and the source
+    at src/<cid>/. LLMs often generate './<cid>' or '../<something>' which
+    resolves to the wrong directory.
+    """
+    correct = f"../../src/{component_id}"
+    # Match: from '<anything that isn't vitest/testing-lib/react/convex/...>'
+    # that contains the component_id (case-insensitive, possibly with slashes).
+    # We target the entire quoted path on the from '...' side of an import.
+    def _replace(m: re.Match) -> str:
+        quote = m.group(1)
+        path = m.group(2)
+        # Skip third-party bare imports (no leading . or /)
+        if not path.startswith("."):
+            return m.group(0)
+        # Skip paths that are already correct
+        if path == correct:
+            return m.group(0)
+        # Only rewrite if the path refers to this component
+        slug = component_id.replace("-", "_").lower()
+        path_lower = path.lower().replace("-", "_")
+        if slug in path_lower or component_id.lower() in path_lower:
+            return f"from {quote}{correct}{quote}"
+        return m.group(0)
+
+    return re.sub(r'from (["\'])(.*?)\1', _replace, code)
+
 
 TEST_SYSTEM = """You are starting fresh on this test suite with no prior context.
 
@@ -317,8 +350,11 @@ Requirements:
 - Use expect() assertions (toBe, toEqual, toThrow, toHaveBeenCalled, etc.)
 - Mock all dependencies using vi.mock() and vi.fn()
 - Import from vitest: import {{ describe, it, expect, vi }} from 'vitest'
-- Import the component module using relative ESM imports, e.g.:
-  import {{ functionName }} from './{contract.component_id}'
+- Import the component module using relative ESM imports. The test file lives at
+  tests/{contract.component_id}/contract_test.test.ts and the implementation lives
+  at src/{contract.component_id}/. The correct relative path is ALWAYS:
+  import {{ functionName }} from '../../src/{contract.component_id}'
+  Never use './{contract.component_id}' or '../{contract.component_id}' — always '../../src/{contract.component_id}'.
 - Each test should have clear assertions
 - test_language must be "typescript"
 - ONLY use vitest — do NOT use jest, mocha, or any other test framework
@@ -349,8 +385,11 @@ Requirements:
 - Use expect() assertions (toBe, toEqual, toThrow, toHaveBeenCalled, etc.)
 - Mock all dependencies using vi.mock() and vi.fn()
 - Import from vitest: import {{ describe, it, expect, vi }} from 'vitest'
-- Import the component module using relative ESM imports with .js extensions, e.g.:
-  import {{ functionName }} from './{contract.component_id}.js'
+- Import the component module using relative ESM imports. The test file lives at
+  tests/{contract.component_id}/contract_test.test.js and the implementation lives
+  at src/{contract.component_id}/. The correct relative path is ALWAYS:
+  import {{ functionName }} from '../../src/{contract.component_id}'
+  Never use './{contract.component_id}' or '../{contract.component_id}' — always '../../src/{contract.component_id}'.
 - Each test should have clear assertions
 - test_language must be "javascript"
 - ONLY use vitest — do NOT use jest, mocha, or any other test framework
@@ -400,6 +439,14 @@ ready to be saved as contract_test.py and run with pytest."""
     suite.component_id = contract.component_id
     suite.contract_version = contract.version
     suite.test_language = language
+
+    # Post-process: fix import path regardless of what the LLM generated.
+    # Test file lives at tests/<cid>/contract_test.test.ts; source at src/<cid>/.
+    # The correct relative path is always '../../src/<cid>'.
+    if suite.generated_code and language in ("typescript", "javascript"):
+        suite.generated_code = _fix_test_import_path(
+            suite.generated_code, contract.component_id,
+        )
 
     logger.info(
         "Tests authored for %s: %d cases (%d tokens)",
