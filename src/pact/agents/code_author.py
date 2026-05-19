@@ -99,6 +99,13 @@ ESM — CRITICAL:
 - All imports must be static ESM import statements at the top of the file.
   Dynamic import() is allowed when lazy-loading is intentional, but require() never is.
 
+ENTRY POINT FILES — CRITICAL:
+- A file loaded as <script type="module"> (e.g. main.tsx) must call its bootstrap/render
+  function at module level. Exporting the function without calling it means the app never starts.
+  WRONG: export function renderEntryPoint() { ... }   // exported but never invoked → white page
+  RIGHT: export function renderEntryPoint() { ... }
+         renderEntryPoint();  // called at module load so Vite boots the app
+
 CROSS-MODULE CONTRACTS — CRITICAL:
 - If this component imports from a sibling component (e.g. content_data, shared_ui),
   check the exact exported names before importing. Importing a name that does not
