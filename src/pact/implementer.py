@@ -1344,6 +1344,10 @@ async def implement_all_iterative(
         if cid not in test_suites:
             logger.warning("No test suite for %s, skipping", cid)
             continue
+        node = tree.nodes.get(cid)
+        if node and node.implementation_status == "tested":
+            logger.info("Skipping %s — already tested (all tests passing)", cid)
+            continue
         implementable.append(cid)
 
     async def _impl_one(component_id: str) -> tuple[str, TestResults]:

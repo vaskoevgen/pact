@@ -69,8 +69,13 @@ class TestAdvancePhase:
         advance_phase(state)
         assert state.phase == "polish"
 
-    def test_polish_to_retrospective(self):
+    def test_polish_to_browser_smoke(self):
         state = RunState(id="x", project_dir="/tmp", phase="polish")
+        advance_phase(state)
+        assert state.phase == "browser_smoke"
+
+    def test_browser_smoke_to_retrospective(self):
+        state = RunState(id="x", project_dir="/tmp", phase="browser_smoke")
         advance_phase(state)
         assert state.phase == "retrospective"
 

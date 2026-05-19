@@ -550,6 +550,8 @@ class Scheduler:
             state = await self._phase_arbiter(state)
         elif phase == "polish":
             state = await self._phase_polish(state)
+        elif phase == "browser_smoke":
+            state = await self._phase_browser_smoke(state)
         elif phase == "diagnose":
             state = await self._phase_diagnose(state, sops)
         elif phase == "retrospective":
@@ -1671,6 +1673,246 @@ class Scheduler:
 
         return state
 
+    async def _ai_fix_browser_errors(
+        self,
+        failures: list,
+        attempt: int,
+    ) -> bool:
+        """Ask the AI to diagnose browser errors and patch source files directly.
+
+        The AI receives each error message and stack trace, reads the relevant
+        source files identified from the stacks, and returns file patches as JSON.
+        Returns True if at least one patch was applied.
+        """
+        import json
+        import os
+        import re
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key or not failures:
+            return False
+
+        project_dir = self.project.project_dir
+        src_dir = project_dir / "src"
+
+        # Extract source file paths from stack traces
+        relevant_files: dict[str, str] = {}
+        for f in failures:
+            stack = f.stderr or f.error_message
+            for match in re.finditer(r"/src/([^:)\"'\s]+\.[tj]sx?)", stack):
+                rel = match.group(1)
+                candidate = src_dir / rel
+                if candidate.exists() and str(candidate) not in relevant_files:
+                    try:
+                        relevant_files[str(candidate)] = candidate.read_text()
+                    except Exception:
+                        pass
+
+        # Also include barrel files (index.ts) for any component mentioned
+        for f in failures:
+            stack = f.stderr or f.error_message
+            for match in re.finditer(r"/src/([^/]+)/", stack):
+                cid = match.group(1)
+                barrel = src_dir / cid / "index.ts"
+                if barrel.exists() and str(barrel) not in relevant_files:
+                    try:
+                        relevant_files[str(barrel)] = barrel.read_text()
+                    except Exception:
+                        pass
+
+        if not relevant_files:
+            logger.warning("browser_smoke ai_fix: no relevant source files found in stacks")
+            return False
+
+        errors_text = "\n\n".join(
+            f"ERROR: {f.error_message}\nSTACK:\n{f.stderr[:800]}"
+            for f in failures[:5]
+        )
+        files_text = "\n\n".join(
+            f"=== {path} ===\n{content[:3000]}"
+            for path, content in list(relevant_files.items())[:6]
+        )
+
+        prompt = (
+            f"A React/TypeScript app built by the Pact AI pipeline has these browser runtime errors "
+            f"(attempt {attempt}):\n\n"
+            f"{errors_text}\n\n"
+            f"Relevant source files:\n\n{files_text}\n\n"
+            "Diagnose each error and return patches as a JSON array:\n"
+            '[\n'
+            '  {\n'
+            '    "file": "<absolute path>",\n'
+            '    "old": "<exact string to replace>",\n'
+            '    "new": "<replacement string>"\n'
+            '  }\n'
+            ']\n\n'
+            "Rules:\n"
+            "- Only patch what is needed to fix the specific error\n"
+            "- Use EXACT strings from the file (whitespace must match)\n"
+            "- If a whole line must be removed, set new to empty string\n"
+            "- Return ONLY the JSON array, no explanation\n"
+        )
+
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+            msg = await client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = msg.content[0].text.strip()
+            # Extract JSON array even if surrounded by markdown fences
+            json_match = re.search(r"\[.*\]", raw, re.DOTALL)
+            if not json_match:
+                logger.warning("browser_smoke ai_fix: no JSON array in response")
+                return False
+
+            patches = json.loads(json_match.group(0))
+            applied = 0
+            for patch in patches:
+                path = Path(patch.get("file", ""))
+                old = patch.get("old", "")
+                new = patch.get("new", "")
+                if not path.exists() or not old:
+                    continue
+                content = path.read_text()
+                if old in content:
+                    path.write_text(content.replace(old, new, 1))
+                    logger.info("browser_smoke ai_fix: patched %s", path.name)
+                    applied += 1
+                else:
+                    logger.warning(
+                        "browser_smoke ai_fix: patch old-string not found in %s", path.name
+                    )
+
+            if applied > 0:
+                self.project.append_audit(
+                    "browser_smoke",
+                    f"ai_fix attempt={attempt} patches_applied={applied}",
+                )
+            return applied > 0
+
+        except Exception as e:
+            logger.warning("browser_smoke ai_fix failed: %s", e)
+            return False
+
+    async def _phase_browser_smoke(self, state: RunState) -> RunState:
+        """Browser smoke phase — verify the built app renders in a real browser.
+
+        Starts a Vite dev server, visits each route via Playwright headless,
+        and feeds any errors back into the AI for dynamic patching.
+        Skipped gracefully when Vite or Playwright is unavailable.
+        """
+        from pact.test_harness import run_browser_smoke_tests
+
+        project_dir = self.project.project_dir
+        language = self.project.language
+        if language != "typescript":
+            advance_phase(state)
+            return state
+
+        # Discover routes from the navigation manifest if present, else use root only
+        routes = self._discover_routes(project_dir)
+
+        max_attempts = getattr(self.project_config, "max_browser_smoke_attempts", 3)
+
+        for attempt in range(1, max_attempts + 1):
+            logger.info("browser_smoke: attempt %d/%d", attempt, max_attempts)
+            results = await run_browser_smoke_tests(project_dir, routes=routes)
+
+            if results.total == 0:
+                # Vite/Playwright not available — skip silently
+                logger.info("browser_smoke: skipped (infrastructure unavailable)")
+                advance_phase(state)
+                return state
+
+            if results.all_passed:
+                logger.info(
+                    "browser_smoke: all %d routes passed on attempt %d",
+                    results.total, attempt,
+                )
+                self.project.append_audit(
+                    "browser_smoke",
+                    f"passed routes={results.total} attempt={attempt}",
+                )
+                advance_phase(state)
+                return state
+
+            # Failures — log them
+            for f in results.failure_details:
+                logger.warning("browser_smoke FAIL [%s]: %s", f.test_id, f.error_message[:120])
+
+            if attempt < max_attempts:
+                patched = await self._ai_fix_browser_errors(
+                    results.failure_details, attempt
+                )
+                if not patched:
+                    logger.warning(
+                        "browser_smoke: AI could not patch errors on attempt %d — stopping",
+                        attempt,
+                    )
+                    break
+            else:
+                logger.warning("browser_smoke: exhausted %d attempts", max_attempts)
+
+        # Still failing — pause for human review
+        sample = results.failure_details[0] if results.failure_details else None
+        sample_error = f"{sample.error_message}\n{sample.stderr}" if sample else "unknown"
+        state.status = "paused"
+        state.pause_reason = (
+            f"Browser smoke tests failing after {max_attempts} AI fix attempts. "
+            f"Sample error: {sample_error[:300]}"
+        )
+        self.project.append_audit(
+            "browser_smoke",
+            f"paused after {max_attempts} attempts: {sample_error[:200]}",
+        )
+        return state
+
+    def _discover_routes(self, project_dir: Path) -> list[str]:
+        """Extract route paths from route/navigation files, falling back to ['/'].
+
+        Searches several conventional locations in priority order:
+          1. src/navigation/routes.ts
+          2. src/app_router/ (any .ts/.tsx file containing path: declarations)
+          3. src/app/ (same)
+        Collects all `path: 'value'` / `path: "value"` patterns found.
+        """
+        import re
+
+        candidate_files: list[Path] = []
+        # Priority: explicit routes file, then common router component dirs
+        candidate_files.append(project_dir / "src" / "navigation" / "routes.ts")
+        for cid in ("app_router", "app", "router", "routes"):
+            cid_dir = project_dir / "src" / cid
+            if cid_dir.is_dir():
+                for ext in ("*.ts", "*.tsx"):
+                    candidate_files.extend(sorted(cid_dir.glob(ext)))
+
+        routes: list[str] = []
+        seen: set[str] = set()
+        for fpath in candidate_files:
+            if not fpath.exists():
+                continue
+            try:
+                content = fpath.read_text()
+                for p in re.findall(r"path:\s*['\"]([^'\"]+)['\"]", content):
+                    if p not in seen:
+                        seen.add(p)
+                        routes.append(p)
+            except Exception:
+                continue
+
+        # Ensure '/' is always first and present
+        if "/" not in seen:
+            routes.insert(0, "/")
+        elif routes and routes[0] != "/":
+            routes.remove("/")
+            routes.insert(0, "/")
+
+        return routes or ["/"]
+
     def _phase_retrospective(self, state: RunState) -> RunState:
         """Retrospective phase — analyze the completed run and capture lessons.
 
@@ -2136,10 +2378,62 @@ class Scheduler:
                 ]
                 state.health_snapshot = snapshot
 
-            state.pause(
-                f"Health check: {decision.message} "
-                f"Review with 'pact health'."
-            )
+            # Auto-recovery: if within cycle budget, apply critical remedies
+            # and route to diagnose instead of pausing for human.
+            cycle_key = "_health_auto_cycles"
+            auto_cycles = snapshot.get(cycle_key, 0)
+            max_auto = self.global_config.max_phase_cycles
+
+            critical_conditions = {f.condition for f in decision.report.critical_findings}
+            from pact.health import HealthCondition
+            is_rejection_rate_block = HealthCondition.rejection_rate in critical_conditions
+
+            if is_rejection_rate_block and auto_cycles < max_auto:
+                # Auto-apply safe config remedies without human approval
+                for remedy in decision.proposed_remedies:
+                    if remedy.kind == "max_plan_revisions":
+                        self.global_config.max_plan_revisions = 1
+                    elif remedy.kind == "shaping":
+                        self.global_config.shaping = False
+
+                # Reset failed component statuses so they get retried
+                tree = self.project.load_tree()
+                if tree:
+                    reset_count = 0
+                    for node in tree.nodes.values():
+                        if node.implementation_status == "failed":
+                            node.implementation_status = "pending"
+                            reset_count += 1
+                    if reset_count:
+                        self.project.save_tree(tree)
+                        logger.info(
+                            "Health auto-recovery: reset %d failed components to pending "
+                            "(cycle %d/%d)",
+                            reset_count, auto_cycles + 1, max_auto,
+                        )
+
+                # Clear accumulated health counters so the next cycle starts fresh
+                for counter_key in (
+                    "implementation_attempts", "implementation_failures",
+                    "cascade_events", "_critical_findings", "_overall_status",
+                    "_proposed_remedies",
+                ):
+                    snapshot.pop(counter_key, None)
+                snapshot[cycle_key] = auto_cycles + 1
+                state.health_snapshot = snapshot
+
+                # Route to implement (not pause) so the daemon continues
+                state.phase = "implement"
+                self.project.append_audit(
+                    "health_auto_recovery",
+                    f"Rejection rate critical — auto-reset and retrying implement "
+                    f"(cycle {auto_cycles + 1}/{max_auto})",
+                )
+            else:
+                state.pause(
+                    f"Health check: {decision.message} "
+                    f"Review with 'pact health'."
+                )
 
         return state
 

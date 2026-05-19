@@ -235,6 +235,21 @@ def main() -> None:
     p_audit.add_argument("project_dir", help="Project directory path")
     p_audit.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
 
+    # check-mocks
+    p_check_mocks = subparsers.add_parser(
+        "check-mocks",
+        help="Detect mock-implementation drift: vi.mock exports that don't exist in real modules",
+    )
+    p_check_mocks.add_argument("project_dir", help="Root directory of the TypeScript project")
+    p_check_mocks.add_argument(
+        "--fix", action="store_true",
+        help="Use AI to propose and apply fixes to consumer files (requires API key)",
+    )
+    p_check_mocks.add_argument("--budget", type=float, default=2.0, help="Max LLM spend in dollars (default: 2.0)")
+    p_check_mocks.add_argument("--model", default="claude-sonnet-4-6", help="LLM model for fixing")
+    p_check_mocks.add_argument("--backend", default="anthropic", help="LLM backend (default: anthropic)")
+    p_check_mocks.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
+
     # test-gen
     p_testgen = subparsers.add_parser("test-gen", help="Generate tests + security audit for any codebase")
     p_testgen.add_argument("project_dir", help="Root directory of the codebase to analyze")
@@ -403,6 +418,8 @@ def main() -> None:
         cmd_export_tasks(args)
     elif args.command == "assess":
         cmd_assess(args)
+    elif args.command == "check-mocks":
+        asyncio.run(cmd_check_mocks(args))
     elif args.command == "audit":
         asyncio.run(cmd_audit(args))
     elif args.command == "test-gen":
@@ -2169,6 +2186,79 @@ def cmd_assess(args: argparse.Namespace) -> None:
         return
 
     print(render_assessment_markdown(report))
+
+
+async def cmd_check_mocks(args: argparse.Namespace) -> None:
+    """Detect and optionally fix mock-implementation drift in TypeScript projects."""
+    from pathlib import Path
+
+    from pact.mock_fidelity import render_report, scan_project
+
+    target = Path(args.project_dir)
+    if not target.is_dir():
+        print(f"Error: {args.project_dir} is not a directory.")
+        return
+
+    report = scan_project(target)
+
+    if getattr(args, "json_output", False):
+        import dataclasses, json as _json
+        print(_json.dumps(
+            {
+                "scanned_test_files": report.scanned_test_files,
+                "scanned_mocks": report.scanned_mocks,
+                "findings": [
+                    {
+                        "test_file": str(f.test_file),
+                        "mock_path": f.mock_path,
+                        "resolved_source": str(f.resolved_source) if f.resolved_source else None,
+                        "ghost_exports": sorted(f.ghost_exports),
+                        "missing_exports": sorted(f.missing_exports),
+                    }
+                    for f in report.findings
+                ],
+            },
+            indent=2,
+        ))
+        return
+
+    print(render_report(report, target))
+
+    ghost_findings = report.ghost_findings
+    if not ghost_findings or not getattr(args, "fix", False):
+        return
+
+    # AI fix mode
+    from pact.agents.mock_fixer import apply_proposal, propose_fix
+    from pact.agents.base import AgentBase
+    from pact.budget import BudgetTracker
+
+    budget = BudgetTracker(cap=args.budget)
+    agent = AgentBase(budget=budget, model=args.model, backend=args.backend)
+
+    print(f"\nRunning AI fixer on {len(ghost_findings)} finding(s) (budget: ${args.budget:.2f})...\n")
+
+    for finding in ghost_findings:
+        print(f"  Analysing {finding.mock_path!r} ghost exports: {sorted(finding.ghost_exports)}")
+        try:
+            fix_list = await propose_fix(agent, finding, target)
+        except Exception as exc:
+            print(f"    ✗ AI fixer error: {exc}")
+            continue
+
+        print(f"    {fix_list.summary}")
+
+        if not fix_list.proposals:
+            print("    (no patches proposed)")
+            continue
+
+        for prop in fix_list.proposals:
+            applied = apply_proposal(prop)
+            status = "✓" if applied else "✗ (old_code not found)"
+            print(f"    {status} {prop.file_path}: {prop.explanation}")
+
+    remaining = budget.remaining
+    print(f"\nDone. Budget used: ${args.budget - remaining:.4f} / ${args.budget:.2f}")
 
 
 def cmd_directive(args: argparse.Namespace) -> None:

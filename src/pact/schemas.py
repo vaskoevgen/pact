@@ -692,8 +692,8 @@ class RunState(BaseModel):
     status: Literal["active", "paused", "completed", "failed", "budget_exceeded"] = "active"
     phase: Literal[
         "interview", "shape", "decompose", "contract", "preflight",
-        "implement", "integrate", "arbiter", "polish", "retrospective",
-        "diagnose", "complete"
+        "implement", "integrate", "arbiter", "polish", "browser_smoke",
+        "retrospective", "diagnose", "complete"
     ] = "interview"
     component_tasks: list[ComponentTask] = []
     interview_result: InterviewResult | None = None

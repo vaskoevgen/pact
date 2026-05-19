@@ -28,6 +28,7 @@ from pact.agents.test_author import (
 )
 from pact.contracts import validate_all_contracts, validate_decomposition_coverage
 from pact.project import ProjectManager
+from pact.test_harness import check_test_collection, check_vi_mock_exports
 from pact.schemas import (
     ComponentContract,
     ContractTestSuite,
@@ -656,16 +657,51 @@ async def decompose_and_contract(
         # Author tests (skip if already exist AND suite is complete)
         suite_complete = component_id in test_suites and len(test_suites[component_id].test_cases) > 0
         if not suite_complete:
-            suite, test_research, test_plan = await author_tests(
-                agent, contract,
-                dependency_contracts=dep_contracts,
-                sops=sops,
-                max_plan_revisions=max_plan_revisions,
-                language=project.language,
-                package_namespace=package_namespace,
-            )
+            max_test_attempts = 3
+            prior_error_context: str | None = None
+            for test_attempt in range(1, max_test_attempts + 1):
+                suite, test_research, test_plan = await author_tests(
+                    agent, contract,
+                    dependency_contracts=dep_contracts,
+                    sops=sops,
+                    max_plan_revisions=max_plan_revisions,
+                    language=project.language,
+                    package_namespace=package_namespace,
+                    prior_error_context=prior_error_context,
+                )
+                project.save_test_suite(suite)
+
+                test_file = project.dev_test_code_path(component_id)
+                attempt_issues: list[str] = []
+
+                # Check 1: test file can be collected (catches syntax/import/hoisting errors)
+                ok, err = await check_test_collection(
+                    test_file, project.project_dir, language=project.language,
+                )
+                if not ok:
+                    attempt_issues.append(f"Collection error: {err[:300]}")
+
+                # Check 2: vi.mock() factories cover all runtime exports of mocked modules
+                if project.language in ("typescript", "javascript"):
+                    _, mock_issues = check_vi_mock_exports(test_file, project.project_dir)
+                    attempt_issues.extend(mock_issues)
+
+                if not attempt_issues:
+                    break
+
+                prior_error_context = "\n".join(attempt_issues)
+                logger.warning(
+                    "Test issues for %s (attempt %d/%d): %s",
+                    component_id, test_attempt, max_test_attempts,
+                    prior_error_context[:300],
+                )
+                if test_attempt == max_test_attempts:
+                    logger.error(
+                        "Test authoring issues after %d attempts for %s — proceeding anyway",
+                        max_test_attempts, component_id,
+                    )
+
             test_suites[component_id] = suite
-            project.save_test_suite(suite)
             project.append_audit(
                 "tests",
                 f"{component_id}: {len(suite.test_cases)} cases",

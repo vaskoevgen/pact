@@ -62,6 +62,9 @@ _PYTHON_BUILTINS = frozenset({
     "EvalError", "Promise", "Array", "Object", "Function", "Symbol",
     "Map", "Set", "WeakMap", "WeakSet", "Date", "RegExp", "JSON",
     "Math", "Number", "String", "Boolean", "BigInt",
+    # TypeScript primitive keywords (lowercase) — reserved words, never user exports
+    "string", "number", "boolean", "void", "never", "unknown", "any",
+    "undefined", "null", "object", "symbol", "bigint",
     # TypeScript utility / mapped types — language built-ins, not module exports
     "Record", "Partial", "Required", "Readonly", "Pick", "Omit",
     "Exclude", "Extract", "NonNullable", "ReturnType", "InstanceType",

@@ -24,34 +24,75 @@ logger = logging.getLogger(__name__)
 
 
 def _fix_test_import_path(code: str, component_id: str) -> str:
-    """Rewrite any LLM-generated import of the component under test to the
-    correct relative path: '../../src/<component_id>'.
+    """Rewrite LLM-generated relative imports to the correct paths.
 
-    The test file lives at tests/<cid>/contract_test.test.ts and the source
-    at src/<cid>/. LLMs often generate './<cid>' or '../<something>' which
-    resolves to the wrong directory.
+    The test file lives at tests/<cid>/contract_test.test.ts.
+    The source lives at src/<cid>/. LLMs often generate wrong relative paths
+    because they think the test lives at the project root or component root.
+
+    Two cases handled:
+    1. Component barrel imports: './<cid>' / '../<cid>' → '../../src/<cid>'
+    2. Sub-module imports: './subdir/foo' or './src/subdir/foo' that don't
+       start with '../../' → '../../src/<cid>/<path>'
     """
-    correct = f"../../src/{component_id}"
-    # Match: from '<anything that isn't vitest/testing-lib/react/convex/...>'
-    # that contains the component_id (case-insensitive, possibly with slashes).
-    # We target the entire quoted path on the from '...' side of an import.
+    correct_barrel = f"../../src/{component_id}"
+
     def _replace(m: re.Match) -> str:
         quote = m.group(1)
         path = m.group(2)
-        # Skip third-party bare imports (no leading . or /)
         if not path.startswith("."):
             return m.group(0)
-        # Skip paths that are already correct
-        if path == correct:
+        if path.startswith("../../"):
             return m.group(0)
-        # Only rewrite if the path refers to this component
+
+        slug = component_id.replace("-", "_").lower()
+        path_lower = path.lower().replace("-", "_")
+
+        # Case 1: barrel import that refers to this component by name
+        if slug in path_lower or component_id.lower() in path_lower:
+            # Only rewrite to bare barrel if path doesn't also have a subpath
+            parts = path.lstrip("./").split("/")
+            if len(parts) <= 2:
+                return f"from {quote}{correct_barrel}{quote}"
+
+        # Case 2: sub-module import (./subdir/X or ./src/subdir/X)
+        # These are written as if the test lives at the component root.
+        # Strip the leading ./ or ../ segments and an optional leading 'src/'
+        stripped = path.lstrip("./")
+        # Remove a spurious leading 'src/' prefix (LLM thinks it's at project root)
+        if stripped.startswith("src/"):
+            stripped = stripped[4:]
+        if stripped:
+            return f"from {quote}../../src/{component_id}/{stripped}{quote}"
+
+        return m.group(0)
+
+    # Fix 'from' imports
+    code = re.sub(r'from (["\'])(\..*?)\1', _replace, code)
+
+    # Also fix dynamic imports: import('./subdir/foo')
+    def _replace_dynamic(m: re.Match) -> str:
+        quote = m.group(1)
+        path = m.group(2)
+        if not path.startswith("."):
+            return m.group(0)
+        if path.startswith("../../"):
+            return m.group(0)
+        stripped = path.lstrip("./")
+        if stripped.startswith("src/"):
+            stripped = stripped[4:]
         slug = component_id.replace("-", "_").lower()
         path_lower = path.lower().replace("-", "_")
         if slug in path_lower or component_id.lower() in path_lower:
-            return f"from {quote}{correct}{quote}"
+            parts = stripped.split("/")
+            if len(parts) <= 2:
+                return f"import({quote}../../src/{component_id}{quote})"
+        if stripped:
+            return f"import({quote}../../src/{component_id}/{stripped}{quote})"
         return m.group(0)
 
-    return re.sub(r'from (["\'])(.*?)\1', _replace, code)
+    code = re.sub(r'import\((["\'])(\..*?)\1\)', _replace_dynamic, code)
+    return code
 
 
 TEST_SYSTEM = """You are starting fresh on this test suite with no prior context.
@@ -117,7 +158,21 @@ describe/it blocks with expect() assertions.
 - Effect v3 CRITICAL: Data.tagged is curried. WRONG: Data.tagged('Tag', {fields}).
   CORRECT: Data.tagged('Tag')({fields}) or Data.TaggedError('Tag')({fields}).
   The second positional argument is silently ignored — this is the #1 Effect v3 mistake.
-  Similarly, Layer.fail() takes a value, not a constructor — pass the constructed error."""
+  Similarly, Layer.fail() takes a value, not a constructor — pass the constructed error.
+
+ESM / VITEST CRITICAL — these run in an ESM environment, not CommonJS:
+- NEVER use require() anywhere in the test file, including inside vi.mock() factories.
+  require() is not available in Vitest's ESM environment and will throw ReferenceError.
+  WRONG: vi.mock('./foo', () => { const m = require('./foo'); return m; })
+  RIGHT: vi.mock('./foo', () => { return { myFn: vi.fn() }; })
+- vi.mock() factory functions are hoisted before all imports. Any variable you need
+  inside a factory must be inlined or captured via a module-level vi.fn() declared
+  OUTSIDE the factory. Never reference module-level const/let inside a factory body.
+  WRONG: const helper = vi.fn(); vi.mock('./dep', () => ({ fn: helper }))
+  RIGHT: const helperFn = vi.fn(); vi.mock('./dep', () => ({ fn: helperFn }))
+  (declare helperFn before the vi.mock call at module scope)
+- Import types with `import type { ... }` — never import interface-only symbols as values.
+  Interfaces are erased at runtime; importing them as values causes "not exported" errors."""
 
 TEST_SYSTEM_JS = """You are starting fresh on this test suite with no prior context.
 
@@ -241,6 +296,7 @@ async def author_tests(
     prior_research: ResearchReport | None = None,
     language: str = "python",
     package_namespace: str = "",
+    prior_error_context: str | None = None,
 ) -> tuple[ContractTestSuite, ResearchReport, PlanEvaluation]:
     """Generate a ContractTestSuite following the Research-First Protocol.
 
@@ -362,6 +418,9 @@ Requirements:
 - For enum types, access variants using the EXACT names from the contract
   (e.g., if the contract says variants: ["active", "paused"], use
   MyEnum.active, NOT MyEnum.ACTIVE)
+- vi.mock() factory objects MUST export every named runtime export of the
+  mocked module. For example, if content_data exports STEPS, ROUTE_SLUG_MAP,
+  and PIPELINE_DIAGRAM, the vi.mock factory must provide all three keys.{(chr(10) + chr(10) + "IMPORTANT — Fix these issues from the previous attempt:" + chr(10) + prior_error_context) if prior_error_context else ""}
 
 The generated_code field should contain the COMPLETE test file content,
 ready to be saved as contract_test.ts and run with vitest."""
@@ -397,6 +456,8 @@ Requirements:
 - For enum types, access variants using the EXACT names from the contract
   (e.g., if the contract says variants: ["active", "paused"], use
   MyEnum.active, NOT MyEnum.ACTIVE)
+- vi.mock() factory objects MUST export every named runtime export of the
+  mocked module. Match the exact export names from the source file.{(chr(10) + chr(10) + "IMPORTANT — Fix these issues from the previous attempt:" + chr(10) + prior_error_context) if prior_error_context else ""}
 
 The generated_code field should contain the COMPLETE test file content,
 ready to be saved as contract_test.js and run with vitest."""
@@ -527,7 +588,13 @@ Key principles:
 - Do NOT duplicate coverage already in the visible tests — find gaps
 - Effect v3 CRITICAL: Data.tagged is curried. WRONG: Data.tagged('Tag', {fields}).
   CORRECT: Data.tagged('Tag')({fields}) or Data.TaggedError('Tag')({fields}).
-  The second positional argument is silently ignored. Layer.fail() takes a value, not a constructor."""
+  The second positional argument is silently ignored. Layer.fail() takes a value, not a constructor.
+
+ESM / VITEST CRITICAL — these run in an ESM environment, not CommonJS:
+- NEVER use require() anywhere, including inside vi.mock() factories.
+- vi.mock() factories are hoisted — do NOT reference module-level variables inside them.
+  Inline all values or use module-scope vi.fn() refs declared before the vi.mock() call.
+- Import types with `import type { ... }` — never import interface-only symbols as values."""
 
 
 async def author_goodhart_tests(

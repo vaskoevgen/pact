@@ -60,6 +60,47 @@ functions are module-level named exports. Use strict mode, unknown instead
 of any. Error classes extend Error. Named exports only, no defaults.
 All log statements include the PACT log key.
 
+FILE PLACEMENT — CRITICAL:
+Your files will be placed inside src/<component_id>/ in the project root.
+Example: if component_id is "navigation", your files land at src/navigation/*.ts.
+This means:
+- When your files reference each other, use paths relative to src/<component_id>/:
+  CORRECT: import { foo } from './utils/helpers'
+  WRONG:   import { foo } from './src/navigation/utils/helpers'
+  WRONG:   import { foo } from '../navigation/utils/helpers'
+- Do NOT include a leading "src/" prefix in any relative import path.
+- Other components (navigation, project_scaffold, shared_ui, etc.) are available
+  as bare module names — import them WITHOUT relative paths:
+  CORRECT: import { getVersionInfo } from 'project_scaffold'
+  CORRECT: import { NavigationShell } from 'navigation'
+  WRONG:   import { getVersionInfo } from '../../src/project_scaffold'
+- Do NOT generate a package.json, vitest.config.ts, or tsconfig.json —
+  the test harness manages these files.
+
+TYPESCRIPT TYPE EXPORTS — CRITICAL:
+- Interfaces and type aliases MUST use `export type { }`, never plain `export { }`.
+  esbuild/rolldown strips plain-exported types at runtime — tests and imports break.
+  WRONG: export { MyInterface, MyType }
+  RIGHT: export type { MyInterface, MyType }
+- Never use TypeScript built-in primitive names as type alias names.
+  The names string, number, boolean, object, any, never, void, unknown are reserved.
+  Using them as type aliases causes parse errors.
+  WRONG: export type string = string;
+  RIGHT: export type StringAlias = string;
+- When a module re-exports a type from another module, use `export type`:
+  WRONG: export { Foo } from './types'
+  RIGHT: export type { Foo } from './types'
+
+CROSS-MODULE CONTRACTS — CRITICAL:
+- If this component imports from a sibling component (e.g. content_data, shared_ui),
+  check the exact exported names before importing. Importing a name that does not
+  exist in the sibling's exports causes a runtime crash.
+- When building a registry or map keyed by domain slugs/identifiers, derive the keys
+  dynamically from the single source of truth (e.g. the manifest from content_data),
+  not from a hardcoded list. Hardcoded lists diverge from the real data over time.
+  WRONG: const REGISTRY = { 'init-project': InitPage, 'setup-auth': SetupPage, ... }
+  RIGHT: const map = {}; for (const entry of manifest) { map[entry.slug] = makePage(entry.slug); }
+
 When the contract defines types with validators, implement them as canonical data
 structures with runtime validation (Zod schemas, branded types, or class constructors
 with checks). Invalid inputs should throw clear errors. Prefer bespoke types over
@@ -341,14 +382,20 @@ Example response format:
         if is_ts:
             prompt = f"""Implement the component described in the handoff brief above.
 
+Component ID: {contract.component_id}
 Research approach: {research.recommended_approach}
 Plan: {plan.plan_summary}
 
 Requirements:
-- Produce a single TypeScript module implementing all types and functions
+- Produce TypeScript files implementing all types and functions
+- Your files will be placed at src/{contract.component_id}/<filename>.
+  Use relative paths for intra-component imports (e.g. './utils/helpers'),
+  NEVER include a leading 'src/' prefix in relative paths.
+  Import sibling components as bare names: import {{ X }} from 'navigation'
 - CRITICAL: All type names, function names, and error class names must match
   the interface stub EXACTLY. See the REQUIRED EXPORTS list at the bottom of
   the stub — every name there MUST be a named export from your module
+- The entry point filename MUST be index.ts so directory imports resolve correctly
 - Handle all error cases using typed Error subclasses with the EXACT class names from the stub
 - Dependencies should be accepted as constructor/function parameters (dependency injection)
 - Code must be clean, well-structured TypeScript with strict typing
@@ -357,10 +404,11 @@ Requirements:
 - Must pass ALL tests listed in the brief
 
 Respond with a JSON object containing a "files" dict where keys are filenames
-and values are file contents. At minimum include a main module file.
+(relative to src/{contract.component_id}/) and values are file contents.
+Always include index.ts as the barrel entry point.
 
 Example response format:
-{{"files": {{"module.ts": "// implementation code..."}}}}"""
+{{"files": {{"index.ts": "export * from './impl';", "impl.ts": "// implementation..."}}}}"""
         elif is_js:
             prompt = f"""Implement the component described in the handoff brief above.
 

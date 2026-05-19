@@ -198,7 +198,7 @@ class AnthropicBackend:
         prompt: str,
         system: str,
         max_tokens: int,
-        stall_timeout: float = 300.0,
+        stall_timeout: float = 600.0,
     ) -> tuple[dict | None, str, int, int]:
         """Call LLM with streaming progress detection.
 
@@ -335,7 +335,7 @@ class AnthropicBackend:
         system: str,
         cache_prefix: str,
         max_tokens: int,
-        stall_timeout: float = 300.0,
+        stall_timeout: float = 600.0,
     ) -> tuple[dict | None, str, int, int]:
         """Like _call_llm but sends system + cache_prefix with cache_control."""
         # Optional register normalization via Transmogrifier
