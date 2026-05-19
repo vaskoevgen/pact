@@ -198,7 +198,7 @@ class AnthropicBackend:
         prompt: str,
         system: str,
         max_tokens: int,
-        stall_timeout: float = 600.0,
+        stall_timeout: float = 90.0,
     ) -> tuple[dict | None, str, int, int]:
         """Call LLM with streaming progress detection.
 
@@ -335,7 +335,7 @@ class AnthropicBackend:
         system: str,
         cache_prefix: str,
         max_tokens: int,
-        stall_timeout: float = 600.0,
+        stall_timeout: float = 90.0,
     ) -> tuple[dict | None, str, int, int]:
         """Like _call_llm but sends system + cache_prefix with cache_control."""
         # Optional register normalization via Transmogrifier
@@ -359,37 +359,66 @@ class AnthropicBackend:
         system_blocks = self._build_system_blocks(system, cache=True)
         user_content = self._build_user_blocks(cache_prefix, prompt)
 
-        try:
-            async with self._client.messages.stream(
-                model=self._model,
-                max_tokens=max_tokens,
-                system=system_blocks,
-                messages=[{"role": "user", "content": user_content}],
-                tools=[{
-                    "name": tool_name,
-                    "description": schema.__doc__ or f"Extract {tool_name}",
-                    "input_schema": tool_schema,
-                }],
-                tool_choice={"type": "tool", "name": tool_name},
-            ) as stream:
-                aiter = stream.__aiter__()
-                while True:
-                    try:
-                        await asyncio.wait_for(aiter.__anext__(), timeout=stall_timeout)
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        raise asyncio.TimeoutError()
+        _max_network_retries = 5
+        _retry_delay = 5.0
+        for _attempt in range(_max_network_retries):
+            try:
+                import httpx as _httpx
+                _network_errors: tuple = (_httpx.ReadError, _httpx.ConnectError, _httpx.RemoteProtocolError)
+            except ImportError:
+                _network_errors = ()
+            try:
+                async with self._client.messages.stream(
+                    model=self._model,
+                    max_tokens=max_tokens,
+                    system=system_blocks,
+                    messages=[{"role": "user", "content": user_content}],
+                    tools=[{
+                        "name": tool_name,
+                        "description": schema.__doc__ or f"Extract {tool_name}",
+                        "input_schema": tool_schema,
+                    }],
+                    tool_choice={"type": "tool", "name": tool_name},
+                ) as stream:
+                    aiter = stream.__aiter__()
+                    while True:
+                        try:
+                            await asyncio.wait_for(aiter.__anext__(), timeout=stall_timeout)
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            raise asyncio.TimeoutError()
 
-            message = await stream.get_final_message()
-        except asyncio.TimeoutError:
-            logger.error(
-                "Anthropic API stalled (no progress for %.0fs) for %s",
-                stall_timeout, tool_name,
-            )
-            raise RuntimeError(
-                f"Anthropic API stalled (no progress for {stall_timeout:.0f}s) for {tool_name}"
-            )
+                message = await stream.get_final_message()
+                break  # success — exit retry loop
+            except asyncio.TimeoutError:
+                if _attempt < _max_network_retries - 1:
+                    logger.warning(
+                        "API stall (no progress for %.0fs) on attempt %d/%d for %s — retrying in %.0fs",
+                        stall_timeout, _attempt + 1, _max_network_retries, tool_name, _retry_delay,
+                    )
+                    await asyncio.sleep(_retry_delay)
+                    _retry_delay = min(_retry_delay * 2, 60.0)
+                    continue
+                logger.error(
+                    "Anthropic API stalled (no progress for %.0fs) for %s after %d attempts",
+                    stall_timeout, tool_name, _max_network_retries,
+                )
+                raise RuntimeError(
+                    f"Anthropic API stalled (no progress for {stall_timeout:.0f}s) for {tool_name}"
+                )
+            except Exception as _exc:
+                if _network_errors and isinstance(_exc, _network_errors):
+                    if _attempt < _max_network_retries - 1:
+                        logger.warning(
+                            "Network error on attempt %d/%d for %s (%s) — retrying in %.0fs",
+                            _attempt + 1, _max_network_retries, tool_name,
+                            type(_exc).__name__, _retry_delay,
+                        )
+                        await asyncio.sleep(_retry_delay)
+                        _retry_delay = min(_retry_delay * 2, 60.0)
+                        continue
+                raise
 
         in_tok = message.usage.input_tokens
         out_tok = message.usage.output_tokens
