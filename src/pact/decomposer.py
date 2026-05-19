@@ -722,14 +722,17 @@ async def decompose_and_contract(
                 )
 
             # Generate emission compliance test (mechanical, no LLM)
-            emission_code = generate_emission_compliance_test(
-                contract, language=project.language,
-            )
-            project.save_emission_test(component_id, emission_code)
-            project.append_audit(
-                "emission_tests",
-                f"{component_id}: emission compliance test generated",
-            )
+            # Skip for TypeScript: the class-based eventHandler pattern doesn't
+            # apply to React functional components — they emit via console.debug.
+            if project.language not in ("typescript", "javascript"):
+                emission_code = generate_emission_compliance_test(
+                    contract, language=project.language,
+                )
+                project.save_emission_test(component_id, emission_code)
+                project.append_audit(
+                    "emission_tests",
+                    f"{component_id}: emission compliance test generated",
+                )
         else:
             logger.info("Skipping tests for %s — already exist", component_id)
 

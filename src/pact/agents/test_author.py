@@ -165,14 +165,21 @@ ESM / VITEST CRITICAL — these run in an ESM environment, not CommonJS:
   require() is not available in Vitest's ESM environment and will throw ReferenceError.
   WRONG: vi.mock('./foo', () => { const m = require('./foo'); return m; })
   RIGHT: vi.mock('./foo', () => { return { myFn: vi.fn() }; })
-- vi.mock() factory functions are hoisted before all imports. Any variable you need
-  inside a factory must be inlined or captured via a module-level vi.fn() declared
-  OUTSIDE the factory. Never reference module-level const/let inside a factory body.
-  WRONG: const helper = vi.fn(); vi.mock('./dep', () => ({ fn: helper }))
-  RIGHT: const helperFn = vi.fn(); vi.mock('./dep', () => ({ fn: helperFn }))
-  (declare helperFn before the vi.mock call at module scope)
+- vi.mock() factory functions are HOISTED before ALL other code including const/let/import.
+  const/let declarations have a temporal dead zone — referencing them inside a vi.mock()
+  factory causes "Cannot access '...' before initialization" (ReferenceError).
+  Use vi.hoisted() to declare mock variables that are shared between vi.mock() and tests:
+  WRONG: const mockFn = vi.fn(); vi.mock('./dep', () => ({ fn: mockFn }))
+  RIGHT: const { mockFn } = vi.hoisted(() => ({ mockFn: vi.fn() }));
+         vi.mock('./dep', () => ({ fn: mockFn }));
+  vi.hoisted() is evaluated before vi.mock() factories, so its return values are safe to use.
+- When a test imports a file that transitively imports 'vite' or '@vitejs/plugin-react'
+  (e.g. vite.config.ts), mock both to prevent esbuild from initializing in jsdom:
+  vi.mock('vite', () => ({ defineConfig: (c: unknown) => c }));
+  vi.mock('@vitejs/plugin-react', () => ({ default: () => ({}) }));
 - Import types with `import type { ... }` — never import interface-only symbols as values.
-  Interfaces are erased at runtime; importing them as values causes "not exported" errors."""
+  Interfaces are erased at runtime; importing them as values causes "not exported" errors.
+- Test files that contain JSX must use the .tsx extension (handled automatically by pact)."""
 
 TEST_SYSTEM_JS = """You are starting fresh on this test suite with no prior context.
 
@@ -592,9 +599,21 @@ Key principles:
 
 ESM / VITEST CRITICAL — these run in an ESM environment, not CommonJS:
 - NEVER use require() anywhere, including inside vi.mock() factories.
-- vi.mock() factories are hoisted — do NOT reference module-level variables inside them.
-  Inline all values or use module-scope vi.fn() refs declared before the vi.mock() call.
-- Import types with `import type { ... }` — never import interface-only symbols as values."""
+- vi.mock() factories are hoisted — use vi.hoisted() for mock variables referenced in factories:
+  WRONG: const mockFn = vi.fn(); vi.mock('./dep', () => ({ fn: mockFn }))
+  RIGHT: const { mockFn } = vi.hoisted(() => ({ mockFn: vi.fn() }));
+         vi.mock('./dep', () => ({ fn: mockFn }));
+- Import types with `import type { ... }` — never import interface-only symbols as values.
+
+IMPORT PATHS — CRITICAL:
+- Goodhart tests live in tests/<component_id>/goodhart/goodhart_test.test.tsx
+- That is THREE levels below the project root, not two.
+- To import from src/<component_id>/: use '../../../src/<component_id>'
+  WRONG: from '../../src/my_component'   (only goes to tests/ level)
+  RIGHT: from '../../../src/my_component'
+- To import a sibling dependency src/<dep_id>/: use '../../../src/<dep_id>'
+- To use vi.mock() on a source module: vi.mock('../../../src/my_component', () => ...)
+- For bare module aliases (shared_ui, page_content, etc.): vi.mock('shared_ui', () => ...)"""
 
 
 async def author_goodhart_tests(

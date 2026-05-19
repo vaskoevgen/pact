@@ -91,6 +91,14 @@ TYPESCRIPT TYPE EXPORTS — CRITICAL:
   WRONG: export { Foo } from './types'
   RIGHT: export type { Foo } from './types'
 
+ESM — CRITICAL:
+- NEVER use require() in any TypeScript source file. This is an ESM project.
+  require() is CommonJS and will throw ReferenceError at runtime in Vite/Vitest.
+  WRONG: const mod = require('some-module');
+  RIGHT: import { something } from 'some-module';
+- All imports must be static ESM import statements at the top of the file.
+  Dynamic import() is allowed when lazy-loading is intentional, but require() never is.
+
 CROSS-MODULE CONTRACTS — CRITICAL:
 - If this component imports from a sibling component (e.g. content_data, shared_ui),
   check the exact exported names before importing. Importing a name that does not

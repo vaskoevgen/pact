@@ -648,7 +648,7 @@ class ProjectManager:
         json_path.write_text(suite.model_dump_json(indent=2))
         # Test code
         if suite.generated_code:
-            test_ext = ".test.ts" if self.language == "typescript" else ".py"
+            test_ext = ".test.tsx" if self.language == "typescript" else ".py"
             test_filename = f"contract_test{test_ext}"
             code_path = visible_test_dir / test_filename
             code_path.write_text(suite.generated_code)
@@ -676,7 +676,7 @@ class ProjectManager:
         return suites
 
     def test_code_path(self, component_id: str) -> Path:
-        test_ext = ".test.ts" if self.language == "typescript" else ".py"
+        test_ext = ".test.tsx" if self.language == "typescript" else ".py"
         return self._visible_tests_dir / component_id / f"contract_test{test_ext}"
 
     # ── Goodhart (Hidden) Test Suites ─────────────────────────────
@@ -687,7 +687,7 @@ class ProjectManager:
         json_path = d / "goodhart_test_suite.json"
         json_path.write_text(suite.model_dump_json(indent=2))
         if suite.generated_code:
-            test_ext = ".test.ts" if self.language == "typescript" else ".py"
+            test_ext = ".test.tsx" if self.language == "typescript" else ".py"
             code_path = d / f"goodhart_test{test_ext}"
             code_path.write_text(suite.generated_code)
         return json_path
@@ -710,7 +710,7 @@ class ProjectManager:
         return suites
 
     def goodhart_test_code_path(self, component_id: str) -> Path:
-        test_ext = ".test.ts" if self.language == "typescript" else ".py"
+        test_ext = ".test.tsx" if self.language == "typescript" else ".py"
         return self._visible_tests_dir / component_id / "goodhart" / f"goodhart_test{test_ext}"
 
     # ── Emission Compliance Tests ─────────────────────────────────
@@ -719,13 +719,13 @@ class ProjectManager:
         """Save a generated emission compliance test for a component."""
         d = self._visible_tests_dir / component_id
         d.mkdir(parents=True, exist_ok=True)
-        test_ext = ".test.ts" if self.language == "typescript" else ".py"
+        test_ext = ".test.tsx" if self.language == "typescript" else ".py"
         path = d / f"emission_test{test_ext}"
         path.write_text(code)
         return path
 
     def emission_test_path(self, component_id: str) -> Path:
-        test_ext = ".test.ts" if self.language == "typescript" else ".py"
+        test_ext = ".test.tsx" if self.language == "typescript" else ".py"
         return self._visible_tests_dir / component_id / f"emission_test{test_ext}"
 
     # ── Implementations ────────────────────────────────────────────
