@@ -314,20 +314,27 @@ Complexity hint: task is ~{len(task.split())} words.{' This appears to be a sing
             root_id = response.components[0].get("id", "root")
 
         # Assign depths and parent_ids from root downward
-        def assign_depth(nid: str, depth: int, parent: str) -> None:
+        def assign_depth(nid: str, depth: int, parent: str, visited: set[str] | None = None) -> None:
+            if visited is None:
+                visited = set()
+            if nid in visited:
+                return  # cycle in LLM-generated tree — skip to avoid infinite recursion
+            visited.add(nid)
             node = nodes.get(nid)
             if not node:
                 return
             node.depth = depth
             node.parent_id = parent
             for child_id in node.children:
-                assign_depth(child_id, depth + 1, nid)
+                assign_depth(child_id, depth + 1, nid, visited)
 
         assign_depth(root_id, 0, "")
 
         # Adopt any remaining orphans (nodes not reachable from root)
         reachable: set[str] = set()
         def collect_reachable(nid: str) -> None:
+            if nid in reachable:
+                return  # cycle guard
             reachable.add(nid)
             node = nodes.get(nid)
             if node:
