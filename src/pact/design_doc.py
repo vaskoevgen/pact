@@ -63,7 +63,12 @@ def _render_tree(tree: DecompositionTree) -> list[str]:
         lines.append("")
         return lines
 
+    visited_nodes: set[str] = set()
+
     def render_node(node: DecompositionNode, indent: int = 0) -> None:
+        if node.component_id in visited_nodes:
+            return  # cycle guard
+        visited_nodes.add(node.component_id)
         prefix = "  " * indent
         status_icon = _status_icon(node.implementation_status)
         lines.append(f"{prefix}- {status_icon} **{node.name}** (`{node.component_id}`)")

@@ -607,8 +607,12 @@ class DecompositionTree(BaseModel):
     def subtree(self, node_id: str) -> list[str]:
         """Return all node IDs in the subtree rooted at node_id (inclusive)."""
         result: list[str] = []
+        seen: set[str] = set()
 
         def collect(nid: str) -> None:
+            if nid in seen:
+                return  # cycle guard
+            seen.add(nid)
             result.append(nid)
             node = self.nodes.get(nid)
             if node:
